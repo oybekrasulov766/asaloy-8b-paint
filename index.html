@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pro Paint App</title>
+    <style>
+        body {
+            margin: 0; padding: 0;
+            display: flex; flex-direction: column;
+            height: 100vh; font-family: 'Segoe UI', sans-serif;
+            background-color: #2c3e50; overflow: hidden;
+            touch-action: none; /* Важно для мобилок: отключает жесты браузера */
+        }
+
+        .toolbar {
+            height: 65px; background-color: #1a1a1a;
+            display: flex; align-items: center;
+            padding: 0 15px; gap: 8px; color: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+            z-index: 100; overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .group { display: flex; align-items: center; gap: 5px; border-right: 1px solid #444; padding-right: 10px; }
+
+        button {
+            padding: 8px 12px; cursor: pointer; border: none;
+            border-radius: 4px; background: #34495e; color: white;
+            font-size: 13px; transition: 0.2s; white-space: nowrap;
+        }
+
+        button:hover { background: #5d6d7e; }
+        button.active { background: #3498db; box-shadow: 0 0 8px #3498db; }
+
+        input[type="color"] { width: 35px; height: 35px; border: none; cursor: pointer; background: none; }
+
+        .canvas-container {
+            flex-grow: 1; position: relative;
+            overflow: auto; background-color: #3d3d3d;
+            display: flex; justify-content: center; align-items: center;
+        }
+
+        canvas {
+            background-color: white;
+            background-image: linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%, #eee), 
+                              linear-gradient(45deg, #eee 25%, white 25%, white 75%, #eee 75%, #eee);
+            background-size: 20px 20px;
+            background-position: 0 0, 10px 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            touch-action: none;
+        }
+
+        .zoom-info { font-size: 12px; color: #3498db; font-weight: bold; min-width: 45px; }
+    </style>
+</head>
+<body>
+
+    <div class="toolbar">
+        <div class="group">
+            <button id="brush" class="active">🖌️</button>
+            <button id="eraser">🧽</button>
+        </div>
+        <div class="group">
+            <button id="line">/</button>
+            <button id="rect">⬜</button>
+            <button id="circle">⭕</button>
+        </div>
+        <div class="group">
+            <input type="color" id="colorPicker">
+            <input type="range" id="brushSize" min="1" max="100" value="5">
+        </div>
+        <div class="group">
+            <button id="zoomIn">+</button>
+            <span class="zoom-info" id="zoomVal">100%</span>
+            <button id="zoomOut">-</button>
+        </div>
+        <div class="group">
+            <button id="undo">↩️</button>
+            <button id="redo">↪️</button>
+        </div>
+        <div class="group" style="border:none">
+            <button id="clear" style="background:#c0392b">Очистить</button>
+            <button id="openBtn">Открыть</button>
+            <input type="file" id="imageLoader" accept="image/*" hidden>
+            <button id="save" style="background:#27ae60">💾 Сохранить</button>
+        </div>
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        const colorPicker = document.getElementById("colorPicker");
+        const brushSize = document.getElementById("brushSize");
+        const zoomVal = document.getElementById("zoomVal");
+        const imageLoader = document.getElementById("imageLoader");
+
+        let tool = "brush";
+        let painting = false;
+        let startX, startY;
+        let snapshot;
+        let history = [];
+        let redoStack = [];
+        let scale = 1;
+        const dpr = window.devicePixelRatio || 1;
+
+        function init() {
+            // Настройка размера с учетом плотности пикселей экрана
+            const displayWidth = window.innerWidth * 0.9;
+            const displayHeight = window.innerHeight * 0.7;
+
+            canvas.style.width = displayWidth + 'px';
+            canvas.style.height = displayHeight + 'px';
+            canvas.width = displayWidth * dpr;
+            canvas.height = displayHeight * dpr;
+
+            ctx.scale(dpr, dpr);
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            
+            saveState();
+        }
+
+        function applyTransform() {
+            // Сброс и применение масштаба (с учетом dpr)
+            ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+            zoomVal.innerText = Math.round(scale * 100) + "%";
+        }
+
+        function saveState() {
+            const currentScale = scale;
+            ctx.setTransform(1,0,0,1,0,0);
+            history.push(canvas.toDataURL());
+            if (history.length > 40) history.shift();
+            redoStack = [];
+            scale = currentScale;
+            applyTransform();
+        }
+
+        function restoreState(data) {
+            if (!data) return;
+            const img = new Image();
+            img.src = data;
+            img.onload = () => {
+                ctx.save();
+                ctx.setTransform(1,0,0,1,0,0);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
+            };
+        }
+
+        function getCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            
+            // Расчет с учетом CSS-масштабирования и внутреннего зума
+            return {
+                x: (clientX - rect.left) * (canvas.width / rect.width / dpr) / scale,
+                y: (clientY - rect.top) * (canvas.height / rect.height / dpr) / scale
+            };
+        }
+
+        // Инструменты
+        document.querySelectorAll('.toolbar button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (['undo', 'redo', 'clear', 'save', 'zoomIn', 'zoomOut', 'openBtn'].includes(btn.id)) return;
+                tool = btn.id;
+                document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            });
+        });
+
+        function startDrawing(e) {
+            if (e.type === 'touchstart') e.preventDefault();
+            painting = true;
+            const pos = getCoords(e);
+            startX = pos.x;
+            startY = pos.y;
+            snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            
+            ctx.beginPath();
+            ctx.lineWidth = brushSize.value;
+            ctx.globalCompositeOperation = (tool === "eraser") ? "destination-out" : "source-over";
+            ctx.strokeStyle = colorPicker.value;
+
+            if (tool === "brush" || tool === "eraser") {
+                ctx.moveTo(startX, startY);
+                ctx.lineTo(startX, startY);
+                ctx.stroke();
+            }
+        }
+
+        function draw(e) {
+            if (!painting) return;
+            const pos = getCoords(e);
+
+            if (tool === "brush" || tool === "eraser") {
+                ctx.lineTo(pos.x, pos.y);
+                ctx.stroke();
+            } else {
+                ctx.save();
+                ctx.setTransform(1,0,0,1,0,0);
+                ctx.putImageData(snapshot, 0, 0);
+                ctx.restore();
+                
+                ctx.beginPath();
+                if (tool === "line") {
+                    ctx.moveTo(startX, startY); ctx.lineTo(pos.x, pos.y);
+                } else if (tool === "rect") {
+                    ctx.strokeRect(startX, startY, pos.x - startX, pos.y - startY);
+                } else if (tool === "circle") {
+                    ctx.arc(startX, startY, Math.hypot(pos.x - startX, pos.y - startY), 0, Math.PI * 2);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function stopDrawing() {
+            if (painting) {
+                painting = false;
+                saveState();
+            }
+        }
+
+        // События
+        canvas.addEventListener("mousedown", startDrawing);
+        window.addEventListener("mousemove", draw);
+        window.addEventListener("mouseup", stopDrawing);
+
+        canvas.addEventListener("touchstart", startDrawing, {passive: false});
+        canvas.addEventListener("touchmove", draw, {passive: false});
+        canvas.addEventListener("touchend", stopDrawing);
+
+        document.getElementById("zoomIn").onclick = () => { scale += 0.1; applyTransform(); restoreState(history[history.length-1]); };
+        document.getElementById("zoomOut").onclick = () => { if(scale > 0.2) scale -= 0.1; applyTransform(); restoreState(history[history.length-1]); };
+
+        document.getElementById("undo").onclick = () => {
+            if (history.length <= 1) return;
+            redoStack.push(history.pop());
+            restoreState(history[history.length - 1]);
+        };
+
+        document.getElementById("save").onclick = () => {
+            const link = document.createElement("a");
+            link.download = "art.png";
+            ctx.setTransform(1,0,0,1,0,0);
+            link.href = canvas.toDataURL();
+            link.click();
+            applyTransform();
+        };
+
+        document.getElementById("clear").onclick = () => {
+            ctx.setTransform(1,0,0,1,0,0);
+            ctx.clearRect(0,0,canvas.width, canvas.height);
+            applyTransform();
+            saveState();
+        };
+
+        init();
+    </script>
+</body>
+</html>
